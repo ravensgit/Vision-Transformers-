@@ -185,18 +185,24 @@ class PatchEmbedding(nn.Module):
         self.num_patches = (img_size // patch_size) ** 2
 
         # TODO 1.1 ── Define self.proj as an nn.Conv2d that:
+        # using conv here to split image into patches and the kernel and stride both same as patch size so patches don’t overlap.
         self.proj = nn.Conv2d(
             in_channels=in_chans,
             out_channels=embed_dim,
             kernel_size=patch_size,
             stride=patch_size,
-            padding=0
+            padding=0   
         ) 
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        x = self.proj(x)          
-        x = x.flatten(start_dim=2) # convert spatial grid into sequence of patches.        
-        x = x.transpose(1, 2)    
+        x = self.proj(x)   # output shape: (B, D, G, G) where G = img_size // patch_size
+
+        # flatten spatial grid (G x G) into a single dimension, so now each patch becomes a token to the shape (B, D, N)
+        x = x.flatten(start_dim=2)
+
+        # swap dimensions to match transformer input format (B, N, D)
+        x = x.transpose(1, 2)
+
         return x
        
 
