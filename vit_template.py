@@ -185,22 +185,20 @@ class PatchEmbedding(nn.Module):
         self.num_patches = (img_size // patch_size) ** 2
 
         # TODO 1.1 ── Define self.proj as an nn.Conv2d that:
-        #   • accepts in_chans input channels
-        #   • outputs embed_dim channels
-        #   • uses kernel_size = patch_size
-        #   • uses stride     = patch_size
-        #   • has no padding (padding=0)
-        raise NotImplementedError("TODO 1.1: implement PatchEmbedding.__init__")
+        self.proj = nn.Conv2d(
+            in_channels=in_chans,
+            out_channels=embed_dim,
+            kernel_size=patch_size,
+            stride=patch_size,
+            padding=0
+        ) 
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        # TODO 1.1 ── Apply self.proj to x, then reshape the output from
-        #   (B, D, G, G) → (B, N, D) where G = img_size // patch_size
-        #   and N = G * G.
-        #
-        #   Hint: after the conv you have shape (B, D, G, G).
-        #   Call .flatten(2) to get (B, D, N), then .transpose(1, 2) for (B, N, D).
-        raise NotImplementedError("TODO 1.1: implement PatchEmbedding.forward")
-
+        x = self.proj(x)          
+        x = x.flatten(start_dim=2) # convert spatial grid into sequence of patches.        
+        x = x.transpose(1, 2)    
+        return x
+       
 
 # ---------------------------------------------------------------------------
 
