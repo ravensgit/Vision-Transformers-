@@ -185,7 +185,7 @@ class PatchEmbedding(nn.Module):
         self.num_patches = (img_size // patch_size) ** 2
 
         # TODO 1.1 ── Define self.proj as an nn.Conv2d that:
-        # using conv here to split image into patches and the kernel and stride both same as patch size so patches don’t overlap.
+        # Using conv here to split image into patches and the kernel and stride both same as patch size so patches don’t overlap. 
         self.proj = nn.Conv2d(
             in_channels=in_chans,
             out_channels=embed_dim,
@@ -195,12 +195,12 @@ class PatchEmbedding(nn.Module):
         ) 
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        x = self.proj(x)   # output shape: (B, D, G, G) where G = img_size // patch_size
+        x = self.proj(x)   
 
-        # flatten spatial grid (G x G) into a single dimension, so now each patch becomes a token to the shape (B, D, N)
+        # Flatten spatial grid (G x G) into a single dimension, so now each patch becomes a token to the shape (B, D, N). 
         x = x.flatten(start_dim=2)
 
-        # swap dimensions to match transformer input format (B, N, D)
+        # Swap dimensions to match transformer input format (B, N, D). 
         x = x.transpose(1, 2)
 
         return x
@@ -273,21 +273,50 @@ class MultiHeadSelfAttention(nn.Module):
 
         # TODO 1.2 ── Create the four linear layers and the dropout layer
         #   described in the docstring above.
-        raise NotImplementedError("TODO 1.2: implement MultiHeadSelfAttention.__init__")
+        # Separate projections for q, k, v from the same input tokens.
+        self.q_proj = nn.Linear(embed_dim, embed_dim, bias=True)
+        self.k_proj = nn.Linear(embed_dim, embed_dim, bias=True)
+        self.v_proj = nn.Linear(embed_dim, embed_dim, bias=True)
+
+        # One more projection after combining all heads back together.
+        self.out_proj = nn.Linear(embed_dim, embed_dim, bias=True)
+
+        # Dropout is applied on attention weights..
+        self.attn_drop = nn.Dropout(dropout)
 
     def forward(
         self, x: torch.Tensor
     ) -> Tuple[torch.Tensor, torch.Tensor]:
         # TODO 1.2 ── Implement MHSA following the 9-step guide in the docstring.
-        #
-        #   Useful ops:
-        #     tensor.reshape(B, T, self.num_heads, self.head_dim)
-        #     tensor.transpose(1, 2)          # swap T and h dimensions
-        #     torch.matmul  or  the @ operator
-        #     F.softmax(scores, dim=-1)
-        #     tensor.transpose(1, 2).contiguous().reshape(B, T, self.embed_dim)
-        raise NotImplementedError("TODO 1.2: implement MultiHeadSelfAttention.forward")
+        B, T, D = x.shape
+        q = self.q_proj(x)  
+        k = self.k_proj(x)   
+        v = self.v_proj(x)   
 
+        # Split D across heads and move num_heads before token dimension.
+        q = q.reshape(B, T, self.num_heads, self.head_dim).transpose(1, 2)   
+        k = k.reshape(B, T, self.num_heads, self.head_dim).transpose(1, 2)   
+        v = v.reshape(B, T, self.num_heads, self.head_dim).transpose(1, 2)   
+
+        # q @ k^T gives attention scores between all tokens.
+        scores = torch.matmul(q, k.transpose(-2, -1)) * self.scale
+    
+        # Softmax turns scores into attention weights.
+        attn_weights = F.softmax(scores, dim=-1)  
+
+        # Apply dropout to attention weights.
+        attn_weights = self.attn_drop(attn_weights)
+
+        # Use attention weights on v to get attended output.
+        context = torch.matmul(attn_weights, v)   
+
+        # Move heads back and join them into full embed_dim again.
+        context = context.transpose(1, 2).contiguous().reshape(B, T, D)   
+
+        # Final linear projection after combining the attended output.
+        out = self.out_proj(context)  
+
+        return out, attn_weights
 
 # ---------------------------------------------------------------------------
 
@@ -336,30 +365,41 @@ class TransformerBlock(nn.Module):
         super().__init__()
 
         # TODO 1.3 ── Create norm1, attn, norm2, and mlp.
-        #
-        #   mlp should be an nn.Sequential with exactly these layers in order:
-        #     nn.Linear(embed_dim, mlp_dim)
-        #     nn.GELU()
-        #     nn.Dropout(dropout)
-        #     nn.Linear(mlp_dim, embed_dim)
-        #     nn.Dropout(dropout)
-        raise NotImplementedError("TODO 1.3: implement TransformerBlock.__init__")
+        
+        # Applying layer normalization before the attention block to stabilize training.
+        self.norm1 = nn.LayerNorm(embed_dim)
+
+        # Multi-head self-attention layer where each token attends to other tokens in the sequence.
+        self.attn = MultiHeadSelfAttention(embed_dim, num_heads, dropout)
+
+        # Applying another layer normalization before the MLP block.
+        self.norm2 = nn.LayerNorm(embed_dim)
+
+        # Feed-forward network (MLP) to further process token representations after attention.
+        self.mlp = nn.Sequential(
+            nn.Linear(embed_dim, mlp_dim),
+            nn.GELU(),
+            nn.Dropout(dropout),
+            nn.Linear(mlp_dim, embed_dim),
+            nn.Dropout(dropout)
+        )
 
     def forward(
         self, x: torch.Tensor
     ) -> Tuple[torch.Tensor, torch.Tensor]:
         # TODO 1.3 ── Implement the pre-norm residual block.
-        #
-        #   Step 1 (attention sub-layer):
-        #     normed      = self.norm1(x)
-        #     attn_out, attn_weights = self.attn(normed)
-        #     x           = x + attn_out
-        #
-        #   Step 2 (MLP sub-layer):
-        #     x           = x + self.mlp(self.norm2(x))
-        #
-        #   Return (x, attn_weights).
-        raise NotImplementedError("TODO 1.3: implement TransformerBlock.forward")
+
+        # First normalize input, then pass through attention and add it back to original input residual connection.
+        normed = self.norm1(x)
+        attn_out, attn_weights = self.attn(normed)
+        x = x + attn_out
+
+        # Apply MLP on normalized output and add it back again second residual connection.
+        x = x + self.mlp(self.norm2(x))
+
+        return x, attn_weights
+        
+        
 
 
 # ---------------------------------------------------------------------------
