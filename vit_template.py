@@ -185,10 +185,8 @@ class PatchEmbedding(nn.Module):
         self.num_patches = (img_size // patch_size) ** 2
 
         # TODO 1.1 ── Define self.proj as an nn.Conv2d that:
-        # Using conv here to split image into patches and the kernel and stride both same as patch size so patches don’t overlap. 
         self.proj = nn.Conv2d(
-            in_channels=in_chans,
-            out_channels=embed_dim,
+            in_chans, embed_dim,
             kernel_size=patch_size,
             stride=patch_size,
             padding=0   
@@ -196,13 +194,8 @@ class PatchEmbedding(nn.Module):
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         x = self.proj(x)   
-
-        # Flatten spatial grid (G x G) into a single dimension, so now each patch becomes a token to the shape (B, D, N). 
         x = x.flatten(start_dim=2)
-
-        # Swap dimensions to match transformer input format (B, N, D). 
         x = x.transpose(1, 2)
-
         return x
        
 
@@ -273,50 +266,30 @@ class MultiHeadSelfAttention(nn.Module):
 
         # TODO 1.2 ── Create the four linear layers and the dropout layer
         #   described in the docstring above.
-        # Separate projections for q, k, v from the same input tokens.
-        self.q_proj = nn.Linear(embed_dim, embed_dim, bias=True)
-        self.k_proj = nn.Linear(embed_dim, embed_dim, bias=True)
-        self.v_proj = nn.Linear(embed_dim, embed_dim, bias=True)
-
-        # One more projection after combining all heads back together.
-        self.out_proj = nn.Linear(embed_dim, embed_dim, bias=True)
-
-        # Dropout is applied on attention weights..
+        self.q_proj    = nn.Linear(embed_dim, embed_dim, bias=True)
+        self.k_proj    = nn.Linear(embed_dim, embed_dim, bias=True)
+        self.v_proj    = nn.Linear(embed_dim, embed_dim, bias=True)
+        self.out_proj  = nn.Linear(embed_dim, embed_dim, bias=True)
         self.attn_drop = nn.Dropout(dropout)
 
     def forward(
         self, x: torch.Tensor
     ) -> Tuple[torch.Tensor, torch.Tensor]:
         # TODO 1.2 ── Implement MHSA following the 9-step guide in the docstring.
-        B, T, D = x.shape
-        q = self.q_proj(x)  
-        k = self.k_proj(x)   
-        v = self.v_proj(x)   
+        B, T, _ = x.shape
+       
+        Q = self.q_proj(x).reshape(B, T, self.num_heads, self.head_dim).transpose(1, 2)
+        K = self.k_proj(x).reshape(B, T, self.num_heads, self.head_dim).transpose(1, 2)
+        V = self.v_proj(x).reshape(B, T, self.num_heads, self.head_dim).transpose(1, 2)
 
-        # Split D across heads and move num_heads before token dimension.
-        q = q.reshape(B, T, self.num_heads, self.head_dim).transpose(1, 2)   
-        k = k.reshape(B, T, self.num_heads, self.head_dim).transpose(1, 2)   
-        v = v.reshape(B, T, self.num_heads, self.head_dim).transpose(1, 2)   
-
-        # q @ k^T gives attention scores between all tokens.
-        scores = torch.matmul(q, k.transpose(-2, -1)) * self.scale
-    
-        # Softmax turns scores into attention weights.
-        attn_weights = F.softmax(scores, dim=-1)  
-
-        # Apply dropout to attention weights.
+        scores       = torch.matmul(Q, K.transpose(-2, -1)) * self.scale
+        attn_weights = F.softmax(scores, dim=-1)   
         attn_weights = self.attn_drop(attn_weights)
 
-        # Use attention weights on v to get attended output.
-        context = torch.matmul(attn_weights, v)   
+        context = torch.matmul(attn_weights, V)    
+        context = context.transpose(1, 2).contiguous().reshape(B, T, self.embed_dim)
 
-        # Move heads back and join them into full embed_dim again.
-        context = context.transpose(1, 2).contiguous().reshape(B, T, D)   
-
-        # Final linear projection after combining the attended output.
-        out = self.out_proj(context)  
-
-        return out, attn_weights
+        return self.out_proj(context), attn_weights
 
 # ---------------------------------------------------------------------------
 
@@ -365,40 +338,28 @@ class TransformerBlock(nn.Module):
         super().__init__()
 
         # TODO 1.3 ── Create norm1, attn, norm2, and mlp.
-        
-        # Applying layer normalization before the attention block to stabilize training.
         self.norm1 = nn.LayerNorm(embed_dim)
-
-        # Multi-head self-attention layer where each token attends to other tokens in the sequence.
-        self.attn = MultiHeadSelfAttention(embed_dim, num_heads, dropout)
-
-        # Applying another layer normalization before the MLP block.
+        self.attn  = MultiHeadSelfAttention(embed_dim, num_heads, dropout)
         self.norm2 = nn.LayerNorm(embed_dim)
-
-        # Feed-forward network (MLP) to further process token representations after attention.
-        self.mlp = nn.Sequential(
+        self.mlp   = nn.Sequential(
             nn.Linear(embed_dim, mlp_dim),
             nn.GELU(),
             nn.Dropout(dropout),
             nn.Linear(mlp_dim, embed_dim),
-            nn.Dropout(dropout)
+            nn.Dropout(dropout),
         )
 
     def forward(
         self, x: torch.Tensor
     ) -> Tuple[torch.Tensor, torch.Tensor]:
         # TODO 1.3 ── Implement the pre-norm residual block.
-
-        # First normalize input, then pass through attention and add it back to original input residual connection.
-        normed = self.norm1(x)
+        normed                 = self.norm1(x)
         attn_out, attn_weights = self.attn(normed)
-        x = x + attn_out
+        x                      = x + attn_out
 
-        # Apply MLP on normalized output and add it back again second residual connection.
         x = x + self.mlp(self.norm2(x))
 
         return x, attn_weights
-        
         
 
 
@@ -488,22 +449,41 @@ class VisionTransformer(nn.Module):
         }
 
         # TODO 1.4 ── Create patch_embed, cls_token, pos_embed, blocks, norm, head.
-        #
-        #   num_patches = patch_embed.num_patches after you create patch_embed.
-        #   pos_embed shape must be (1, num_patches + 1, embed_dim).
-        #
-        #   Initialise cls_token and pos_embed with torch.zeros (wrapped in
-        #   nn.Parameter so they are learnable).
-        #
-        #   blocks is an nn.ModuleList; create num_layers TransformerBlock instances.
-        raise NotImplementedError("TODO 1.4: implement VisionTransformer.__init__")
+        self.patch_embed = PatchEmbedding(img_size, patch_size, in_chans, embed_dim)
+        num_patches = self.patch_embed.num_patches
+
+        self.cls_token = nn.Parameter(torch.zeros(1, 1, embed_dim))
+        self.pos_embed = nn.Parameter(torch.zeros(1, num_patches + 1, embed_dim))
+
+        self.blocks = nn.ModuleList([
+            TransformerBlock(embed_dim, num_heads, mlp_dim, dropout)
+            for _ in range(num_layers)
+        ])
+
+        self.norm = nn.LayerNorm(embed_dim)
+        self.head = nn.Linear(embed_dim, num_classes)
 
     def forward(
         self, x: torch.Tensor
     ) -> Tuple[torch.Tensor, List[torch.Tensor]]:
         # TODO 1.4 ── Follow the 9-step guide in the docstring.
-        raise NotImplementedError("TODO 1.4: implement VisionTransformer.forward")
+        B = x.shape[0]
 
+        x           = self.patch_embed(x)                    
+        cls_tokens  = self.cls_token.expand(B, -1, -1)        
+        x           = torch.cat([cls_tokens, x], dim=1)       
+        x           = x + self.pos_embed
+
+        attn_list = []
+        for block in self.blocks:
+            x, attn = block(x)
+            attn_list.append(attn)
+
+        x       = self.norm(x)
+        cls_out = x[:, 0]                                       
+        logits  = self.head(cls_out)                           
+
+        return logits, attn_list
 
 # =============================================================================
 # Helper: build a VisionTransformer from a config dict
@@ -584,14 +564,28 @@ def get_cifar10_subset(
     Concatenate all class index lists and wrap in a Subset.
     """
     # TODO 1.5 ── Implement this function.
-    #
-    #   1. Define the transform (ToTensor + Normalize as above).
-    #   2. Load the full CIFAR-10 train and test splits.
-    #   3. call set_all_seeds(get_seed()) before any sampling.
-    #   4. For each class 0-9, collect its indices in the training set,
-    #      then randomly sample 500 of them.
-    #   5. Return (Subset(train_dataset, selected_indices), test_dataset).
-    raise NotImplementedError("TODO 1.5: implement get_cifar10_subset")
+    tfm = transforms.Compose([
+        transforms.ToTensor(),
+        transforms.Normalize(mean=(0.4914, 0.4822, 0.4465),
+                             std =(0.2470, 0.2435, 0.2616)),
+    ])
+
+    full_train = datasets.CIFAR10(root=data_root, train=True,
+                                  download=True, transform=tfm)
+    test_dataset = datasets.CIFAR10(root=data_root, train=False,
+                                    download=True, transform=tfm)
+
+    set_all_seeds(get_seed())
+
+    by_class = {c: [] for c in range(10)}
+    for idx, lbl in enumerate(full_train.targets):
+        by_class[lbl].append(idx)
+
+    chosen = []
+    for c in range(10):
+        chosen.extend(random.sample(by_class[c], 500))
+
+    return Subset(full_train, chosen), test_dataset
 
 
 def train_model(
@@ -672,7 +666,76 @@ def train_model(
     • Create checkpoint_dir if it doesn't exist: os.makedirs(..., exist_ok=True)
     """
     # TODO 1.6 ── Implement the training loop.
-    raise NotImplementedError("TODO 1.6: implement train_model")
+    os.makedirs(checkpoint_dir, exist_ok=True)
+
+    train_loader = DataLoader(train_subset,
+                              batch_size=config["batch_size"], shuffle=True)
+    test_loader  = DataLoader(test_dataset, batch_size=256, shuffle=False)
+
+    opt   = torch.optim.AdamW(model.parameters(),
+                               lr=config["lr"], weight_decay=1e-4)
+    sched = torch.optim.lr_scheduler.CosineAnnealingLR(opt, T_max=config["epochs"])
+
+    total_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
+    history = []
+
+    for ep in range(1, config["epochs"] + 1):
+        t0 = time.time()
+
+        model.train()
+        total_loss, n_batches = 0.0, 0
+        for imgs, lbls in train_loader:
+            opt.zero_grad()
+            loss = F.cross_entropy(model(imgs)[0], lbls)
+            loss.backward()
+            opt.step()
+            total_loss += loss.item()
+            n_batches  += 1
+
+        model.eval()
+        n_correct = n_total = 0
+        with torch.no_grad():
+            for imgs, lbls in test_loader:
+                preds      = model(imgs)[0].argmax(dim=1)
+                n_correct += (preds == lbls).sum().item()
+                n_total   += lbls.size(0)
+
+        mean_loss = total_loss / max(n_batches, 1)
+        val_acc   = n_correct  / max(n_total,   1)
+        elapsed   = time.time() - t0
+        sched.step()
+
+        history.append({
+            "epoch":          ep,
+            "train_loss":     round(mean_loss, 4),
+            "val_accuracy":   round(val_acc,   4),
+            "epoch_time_sec": round(elapsed,   4),
+        })
+        print(f"  ep {ep:02d}/{config['epochs']} | "
+              f"loss={mean_loss:.4f} | val={val_acc:.4f} | {elapsed:.1f}s")
+
+        if ep in checkpoint_epochs:
+            ckpt = os.path.join(checkpoint_dir, f"baseline_epoch_{ep}.pt")
+            torch.save({
+                "model_state_dict": model.state_dict(),
+                "config":           model.config,
+                "epoch":            ep,
+                "student_id":       STUDENT_ID,
+            }, ckpt)
+            print(f"  checkpoint -> {ckpt}")
+
+    log = {
+        "student_id":         STUDENT_ID,
+        "seed":               get_seed(),
+        "config":             config,
+        "history":            history,
+        "final_val_accuracy": history[-1]["val_accuracy"] if history else 0.0,
+        "total_params":       total_params,
+    }
+    if log_path:
+        _save_json(log, log_path)
+    return log
+
 
 
 # =============================================================================
