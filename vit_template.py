@@ -924,7 +924,33 @@ def compute_attention_entropy(
     • os.makedirs(os.path.dirname(output_path), exist_ok=True) before writing.
     """
     # TODO 3.1 -- Implement attention entropy computation.
-    raise NotImplementedError("TODO 3.1: implement compute_attention_entropy")
+    set_all_seeds(get_seed())
+    model = _load_baseline_checkpoint(checkpoint_path)
+
+    _, test_dataset = get_cifar10_subset()
+    test_loader = DataLoader(test_dataset, batch_size=256, shuffle=False)
+
+    n_layers = len(model.blocks)
+    bucket   = [[] for _ in range(n_layers)]
+
+    with torch.no_grad():
+        for imgs, _ in test_loader:
+            _, attn_list = model(imgs)
+            for l, aw in enumerate(attn_list):
+                bucket[l].append(aw[:, :, 0, :].cpu())  
+
+    eps    = 1e-9
+    result = {}
+    for l in range(n_layers):
+        stacked = torch.cat(bucket[l], dim=0)          
+        mean_p  = stacked.mean(dim=0).mean(dim=0)     
+        mean_p  = mean_p.clamp(min=eps)
+        entropy = -(mean_p * torch.log2(mean_p)).sum().item()
+        result[f"layer_{l}"] = round(entropy, 4)
+
+    os.makedirs(os.path.dirname(output_path), exist_ok=True)
+    _save_json(result, output_path)
+    return result
 
 
 def compute_pos_embed_correlation(
@@ -974,8 +1000,32 @@ def compute_pos_embed_correlation(
     • num_pairs = N * (N - 1) // 2
     """
     # TODO 3.2 -- Implement positional embedding correlation.
-    raise NotImplementedError("TODO 3.2: implement compute_pos_embed_correlation")
+    set_all_seeds(get_seed())
+    model = _load_baseline_checkpoint(checkpoint_path)
 
+    pos = model.pos_embed.data.squeeze(0)[1:]     
+    N   = pos.shape[0]
+
+    normed = F.normalize(pos, dim=-1)
+    S      = normed @ normed.T                      
+
+    G      = 32 // model.config["patch_size"]
+    ks     = torch.arange(N)
+    coords = torch.stack([ks // G, ks % G], dim=1).float()
+
+    delta  = coords[:, None, :] - coords[None, :, :]
+    E      = delta.norm(dim=-1)                 
+
+    ui      = torch.triu_indices(N, N, offset=1)
+    pearson_r = float(np.corrcoef(
+        S[ui[0], ui[1]].numpy(),
+        E[ui[0], ui[1]].numpy()
+    )[0, 1])
+
+    result = {"pearson_r": round(pearson_r, 4), "num_pairs": N * (N - 1) // 2}
+    os.makedirs(os.path.dirname(output_path), exist_ok=True)
+    _save_json(result, output_path)
+    return result
 
 def compute_per_class_accuracy(
     checkpoint_path: str = "checkpoints/baseline_epoch_20.pt",
