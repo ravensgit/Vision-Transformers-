@@ -1003,7 +1003,7 @@ def compute_pos_embed_correlation(
     set_all_seeds(get_seed())
     model = _load_baseline_checkpoint(checkpoint_path)
 
-    pos = model.pos_embed.data.squeeze(0)[1:]     
+    pos = model.pos_embed.detach().squeeze(0)[1:]
     N   = pos.shape[0]
 
     normed = F.normalize(pos, dim=-1)
@@ -1017,10 +1017,11 @@ def compute_pos_embed_correlation(
     E      = delta.norm(dim=-1)                 
 
     ui      = torch.triu_indices(N, N, offset=1)
-    pearson_r = float(np.corrcoef(
-        S[ui[0], ui[1]].numpy(),
-        E[ui[0], ui[1]].numpy()
-    )[0, 1])
+    
+    S_vals = S[ui[0], ui[1]].cpu().numpy()
+    E_vals = E[ui[0], ui[1]].cpu().numpy()
+
+    pearson_r = float(np.corrcoef(S_vals, E_vals)[0, 1])
 
     result = {"pearson_r": round(pearson_r, 4), "num_pairs": N * (N - 1) // 2}
     os.makedirs(os.path.dirname(output_path), exist_ok=True)
@@ -1067,7 +1068,43 @@ def compute_per_class_accuracy(
       Diagonal entries are correct predictions; off-diagonal are confusions.
     """
     # TODO 3.3 -- Implement per-class accuracy and confusion analysis.
-    raise NotImplementedError("TODO 3.3: implement compute_per_class_accuracy")
+    set_all_seeds(get_seed())
+    model = _load_baseline_checkpoint(checkpoint_path)
+
+    _, test_dataset = get_cifar10_subset()
+    test_loader     = DataLoader(test_dataset, batch_size=256, shuffle=False)
+
+    all_true, all_pred = [], []
+    with torch.no_grad():
+        for imgs, lbls in test_loader:
+            all_true.append(lbls)
+            all_pred.append(model(imgs)[0].argmax(dim=1))
+
+    true_t = torch.cat(all_true)
+    pred_t = torch.cat(all_pred)
+
+    conf = torch.zeros(10, 10, dtype=torch.long)
+    for t, p in zip(true_t.tolist(), pred_t.tolist()):
+        conf[t][p] += 1
+
+    class_accuracies = {}
+    for c in range(10):
+        total = conf[c].sum().item()
+        class_accuracies[str(c)] = round(
+            conf[c][c].item() / total if total > 0 else 0.0, 4
+        )
+
+    pairs = [
+        [t, p, conf[t][p].item()]
+        for t in range(10) for p in range(10)
+        if t != p and conf[t][p].item() > 0
+    ]
+    pairs.sort(key=lambda row: -row[2])
+
+    result = {"class_accuracies": class_accuracies, "top3_confusions": pairs[:3]}
+    os.makedirs(os.path.dirname(output_path), exist_ok=True)
+    _save_json(result, output_path)
+    return result
 
 
 def compute_attention_distance(
@@ -1118,7 +1155,38 @@ def compute_attention_distance(
       Then .mean(dim=-1) → (B, h), then .mean() for the scalar.
     """
     # TODO 3.4 -- Implement mean attention distance computation.
-    raise NotImplementedError("TODO 3.4: implement compute_attention_distance")
+    set_all_seeds(get_seed())
+    model = _load_baseline_checkpoint(checkpoint_path)
+
+    ps = model.config["patch_size"]
+    G  = 32 // ps
+    N  = G * G
+    
+    ks     = torch.arange(N)
+    coords = torch.stack([ks // G, ks % G], dim=1).float()
+    d_grid = (coords[:, None, :] - coords[None, :, :]).norm(dim=-1) 
+    _, test_dataset = get_cifar10_subset()
+    test_loader     = DataLoader(test_dataset, batch_size=256, shuffle=False)
+    n_layers        = len(model.blocks)
+
+    dist_bucket = [[] for _ in range(n_layers)]
+    with torch.no_grad():
+        for imgs, _ in test_loader:
+            _, attn_list = model(imgs)
+            for l, aw in enumerate(attn_list):
+                A = aw[:, :, 1:, 1:]                           
+                A = A / A.sum(dim=-1, keepdim=True).clamp(min=1e-9)
+                per_query = (A * d_grid).sum(dim=-1)              
+                mean_d    = per_query.mean(dim=-1).mean(dim=-1)    
+                dist_bucket[l].append(mean_d.cpu())
+
+    result = {}
+    for l in range(n_layers):
+        result[f"layer_{l}"] = round(torch.cat(dist_bucket[l]).mean().item(), 4)
+
+    os.makedirs(os.path.dirname(output_path), exist_ok=True)
+    _save_json(result, output_path)
+    return result
 
 
 # =============================================================================
